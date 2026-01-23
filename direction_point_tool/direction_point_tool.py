@@ -21,9 +21,23 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, QVariant
+from qgis.PyQt.QtGui import QIcon, QCursor, QColor
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsApplication
+from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.core import (
+    QgsPointXY,
+    QgsFeature,
+    QgsGeometry,
+    QgsProject,
+    QgsVectorLayer,
+    QgsField,
+    QgsWkbTypes,
+    QgsFeatureRequest,
+    QgsVectorLayerUtils,
+)
+import math
 
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -34,7 +48,7 @@ import os.path
 
 class DirectionPointTool:
     """QGIS Plugin Implementation."""
-
+    
     def __init__(self, iface):
         """Constructor.
 
@@ -66,7 +80,13 @@ class DirectionPointTool:
         # Check if plugin was started the first time in current QGIS session
         # Must be set in initGui() to survive plugin reloads
         self.first_start = None
-
+        
+        self.activeLayer = None
+        self.field_name = None
+        self.canvas = iface.mapCanvas()
+        self.possible_bearing_field_names = ["bearing","Bearing","direction","Direction"]
+        self.tool = None
+        
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
         """Get the translation for a string using Qt translation API.
@@ -146,7 +166,7 @@ class DirectionPointTool:
 
         if add_to_toolbar:
             # Adds plugin icon to Plugins toolbar
-            self.iface.addToolBarIcon(action)
+            self.iface.digitizeToolBar().addAction(action)
 
         if add_to_menu:
             self.iface.addPluginToVectorMenu(
@@ -157,19 +177,60 @@ class DirectionPointTool:
 
         return action
 
+    def toggle(self):
+        """Toggle the button, whether the layer is editable or not"""
+        layer = self.iface.activeLayer()
+        if layer and layer.type() == layer.VectorLayer:
+            #Disconnect previous connections
+            self.activeLayer = layer
+            try:
+                self.activeLayer.editingStarted.disconnect(self.toggle)
+            except:
+                pass
+            try:
+                self.activeLayer.editingStopped.disconnect(self.toggle)
+            except:
+                pass
+            
+            if layer.isEditable():
+                self.actions[0].setEnabled(True)
+                self.activeLayer.editingStopped.connect(self.toggle)
+            else:
+                self.actions[0].setEnabled(False)
+                self.activeLayer.editingStarted.connect(self.toggle)
+        else:
+            self.actions[0].setEnabled(False)
+    
     def initGui(self):
         """Create the menu entries and toolbar icons inside the QGIS GUI."""
 
         icon_path = ':/plugins/direction_point_tool/icon.png'
+        config_icon = QgsApplication.getThemeIcon('/mActionOptions.svg')
+        
         self.add_action(
             icon_path,
+            callback=self.run_tool,
             text=self.tr(u'Add directional point'),
-            callback=self.run,
             parent=self.iface.mainWindow())
-
+        
+        self.add_action(
+            config_icon,
+            text=self.tr(u'Direction Point Tool settings'),
+            callback=self.run_settings  ,
+            parent=self.iface.mainWindow(),
+            add_to_toolbar=False)
+        
+        self.actions[0].setCheckable(True)
+        self.canvas.currentLayerChanged.connect(self.toggle)
+        self.tool = Tool(self.iface, self.activeLayer, self.field_name)
+        self.tool.setAction(self.actions[0])
+        
+        self.toggle()
         # will be set False in run()
         self.first_start = True
 
+    def deactivate(self):
+        self.actions[0].setChecked(False)
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
@@ -177,24 +238,301 @@ class DirectionPointTool:
             self.iface.removePluginVectorMenu(
                 self.tr(u'&Direction Point Tool'),
                 action)
-            self.iface.removeToolBarIcon(action)
+            self.iface.digitizeToolBar().removeAction(action)
 
-
-    def run(self):
-        """Run method that performs all the real work"""
+    def run_settings(self):
+        """Open the settings menu - which will specify which name field to use."""
 
         # Create the dialog with elements (after translation) and keep reference
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
         if self.first_start == True:
             self.first_start = False
             self.dlg = DirectionPointToolDialog()
+            
 
+        activeLayer = self.iface.activeLayer()
+        if activeLayer is not None and activeLayer.type() == activeLayer.VectorLayer and activeLayer != self.activeLayer:
+            self.activeLayer = activeLayer
+            self.field_name = None
+        elif activeLayer is not None and activeLayer.type() == activeLayer.VectorLayer and activeLayer == self.activeLayer:
+            pass  # keep current activeLayer
+        else:
+            self.activeLayer = None
+            self.dlg.fieldNameComboBox.clear()
+            self.dlg.fieldNameComboBox.addItem(self.tr("No active vector layer"))
+
+        if self.activeLayer is not None:
+            self.dlg.fieldNameComboBox.clear()
+            field_names = [field.name() for field in self.activeLayer.fields() if field.type() in (2, 4, 6)]  # 2=Int,4=Double,6=Float
+            self.dlg.fieldNameComboBox.addItems(field_names)
+            if self.field_name in field_names:
+                index = field_names.index(self.field_name)
+                self.dlg.fieldNameComboBox.setCurrentIndex(index)
+        else:
+            self.dlg.fieldNameComboBox.clear()
+            self.dlg.fieldNameComboBox.addItem(self.tr("No active layer"))
+    
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
         result = self.dlg.exec_()
         # See if OK was pressed
         if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
+            field_name = self.dlg.fieldNameComboBox.currentText()
+            if self.activeLayer is not None and field_name != self.tr("No active layer") and field_name in [field.name() for field in self.activeLayer.fields()]:
+                self.field_name = field_name
+            else:
+                self.field_name = None
+    
+    def run_tool(self):
+        """Run the Direction Point Tool."""
+        if self.activeLayer is None or not isinstance(self.activeLayer, QgsVectorLayer):
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Please set a valid target layer before using the tool.")
+            return
+        if self.field_name is None or self.field_name not in [field.name() for field in self.activeLayer.fields()]:
+            for field in self.possible_bearing_field_names:
+                if field in [f.name() for f in self.activeLayer.fields()]:
+                    self.field_name = field
+                    break
+        if self.field_name is None:
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Please set a valid field name before using the tool, in the settings.")
+            return
+        self.tool.setTargetLayer(self.activeLayer)
+        self.tool.setFieldName(self.field_name)        
+        
+        if self.canvas.mapTool() == self.tool:
+            self.iface.actionPan().trigger()
+        else:
+            self.canvas.setMapTool(self.tool)
+
+class Tool(QgsMapTool):
+    def __init__(self, iface, target_layer, field_name):
+        super().__init__(iface.mapCanvas())
+        
+        self.iface = iface
+        self.target_layer = target_layer
+        self.field_name = field_name
+        self.canvas = iface.mapCanvas()
+        self.setCursor(QCursor(Qt.CrossCursor))
+        self.rubberBand = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+        self.rubberBand.setColor(QColor(255, 0, 0))
+        self.rubberBand.setWidth(2)
+        self.startPoint = None
+        self.is_drawing = False
+        self.endPoint = None
+        
+        self.last_values = {} #Store the last used values - it's a poor man's "reuse last values" feature
+        
+    def setTargetLayer(self, layer):
+        self.target_layer = layer
+    
+    def setFieldName(self, field_name):
+        self.field_name = field_name
+    
+    def ensure_target_layer(self):
+        """A load of checks to make sure the fields and layers match up!"""
+        if self.target_layer is None:
+            self.iface.messageBar().pushWarning("Direction Point Tool", "No target layer set. Please set a target layer in the settings.")
+            return False
+        elif not isinstance(self.target_layer, QgsVectorLayer):
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Target layer is not a vector layer. Please set a valid target layer in the settings.")
+            return False
+        elif self.target_layer.geometryType() != QgsWkbTypes.PointGeometry or self.target_layer.wkbType() not in (QgsWkbTypes.Point, QgsWkbTypes.Point25D, QgsWkbTypes.MultiPoint, QgsWkbTypes.MultiPoint25D):
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Target layer is not a point layer. Please chose a valid point layer before using the tool.")
+            return False
+        try:
+            layer = self.iface.activeLayer()
+        except NameError:
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Could not access active layer. Please ensure a valid target layer and try again")
+            return False
+        
+        if self.target_layer != layer:
+            self.iface.messageBar().pushWarning("Direction Point Tool", "Target layer does not match active layer. Please ensure the correct target layer is chosen before using the tool.")
+            return False
+        
+        if self.field_name is None or self.field_name not in [field.name() for field in self.target_layer.fields()]:
+            self.iface.messageBar().pushWarning("Direction Point Tool", "No valid field name set. Please set a valid field name in the settings.")
+            return False
+        
+        return True
+    
+    def canvasPressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return # Only respond to left mouse button
+        self.startPoint = self.toMapCoordinates(event.pos())
+        self.is_drawing = True
+        
+        if self.rubberBand is None:
+            self.rubberBand = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+            self.rubberBand.setColor(QColor(255, 0, 0))
+            self.rubberBand.setWidth(2)
+        self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+        self.rubberBand.addPoint(self.startPoint)
+        self.rubberBand.addPoint(self.startPoint)  # Temporary second point - so it is actually a line geometry!
+        
+    def canvasMoveEvent(self, event):
+        if not self.is_drawing or self.startPoint is None:
+            return
+        currentPoint = self.toMapCoordinates(event.pos())
+        self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+        self.rubberBand.addPoint(self.startPoint)
+        self.rubberBand.addPoint(currentPoint)
+        
+    
+    def computer_bearing(self, start_point, end_point):
+        """Compute bearing in degrees from start_point to end_point."""
+        delta_x = end_point.x() - start_point.x()
+        delta_y = end_point.y() - start_point.y()
+        distance = math.hypot(delta_x, delta_y)
+        if distance < 1e-6:
+            return None  # Points are too close to determine a bearing
+        angle_deg = math.degrees(math.atan2(delta_y, delta_x))
+        bearing = (90-angle_deg) % 360  # Convert to bearing (0° = North, clockwise)
+        return bearing
+    
+    def canvasReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton or not self.is_drawing or self.startPoint is None:
+            return
+        self.endPoint = self.toMapCoordinates(event.pos())
+        bearing  = self.computer_bearing(self.startPoint, self.endPoint)
+        if self.ensure_target_layer():
+            #Layer is all corect, so lets add the point
+            layer_is_editable = self.target_layer.isEditable()
+            try:
+                if not layer_is_editable:
+                    self.target_layer.startEditing()
+            except Exception as e:
+                self.iface.messageBar().pushWarning("Direction Point Tool", f"Could not start editing on target layer: {e}")
+                return
+            geom = QgsGeometry.fromPointXY(QgsPointXY(self.startPoint))
+            feat = QgsVectorLayerUtils.createFeature(self.target_layer, geom, {}, self.target_layer.createExpressionContext())
+            
+            #prefil the fields from the cache
+            
+            layer_id = self.target_layer.id()
+            last_vals = self.last_values.get(layer_id, {})
+            fields_to_reuse = self.collectFieldsToReuse(self.target_layer)
+            if self.field_name in fields_to_reuse:
+                fields_to_reuse.remove(self.field_name)  # Remove the bearing field from reuse list as that will be set below
+            
+            if last_vals:
+                for field_name in fields_to_reuse:
+                    if field_name in last_vals:
+                        feat.setAttribute(field_name, last_vals[field_name])
+            #Set the bearing field
+            feat.setAttribute(self.field_name, bearing)
+            
+            #Add features to the edit buffer
+            added = False
+            used_provider_fallback = False
+            fid = None
+            
+            try:
+                added = self.target_layer.addFeature(feat)
+                fid = feat.id() if feat.id() is not None else None
+            except Exception as e:
+                added = False
+            if not added:
+                try:
+                    provider = self.target_layer.dataProvider()
+                    success, added_feats = provider.addFeatures([feat])
+                    used_provider_fallback = True
+                    
+                    if success and added_feats:
+                        feat = added_feats[0]
+                        fid = added_feats[0].id()
+                        added = True
+                except Exception as e:
+                    added=False
+                
+                if not added:
+                    self.iface.messageBar().pushWarning("Direction Point Tool", "Failed to add point feature to target layer.")
+                    self.cleanup_after()
+                    return
+            
+            real_feature = None
+            if fid is not None and fid != -1:
+                try:
+                    real_feature = self.target_layer.getFeature(fid)
+                except Exception as e:
+                    try:
+                        req = QgsFeatureRequest().setFilterFid(fid)
+                        features = self.target_layer.getFeatures(req)
+                        real_feature = next(features, None)
+                    except Exception as e:
+                        real_feature = None
+                if real_feature is None:
+                    #Still no joy fetching
+                    real_feature = feat  #Fallback to the original feature
+                
+                accepted =  True
+                try:
+                    res = self.iface.openFeatureForm(self.target_layer, real_feature, showModal=True)
+                    if isinstance(res, bool):
+                        accepted = res
+                except TypeError:
+                    try:
+                        res = self.iface.openFeatureForm(self.target_layer, real_feature)
+                        if isinstance(res, bool):
+                            accepted = res
+                    except Exception as e:
+                        accepted = True  #Fallback to assuming accepted
+                
+                if not accepted:
+                    #User cancelled the form - remove it
+                    try:
+                        fid_to_delete = real_feature.id() if real_feature is not None else None
+                        if fid_to_delete is not None and fid_to_delete != -1:
+                            self.target_layer.deleteFeature(fid_to_delete)
+                        else:
+                            try:
+                                self.target_layer.dataProvider().deleteFeatures([fid_to_delete])
+                            except Exception as e:
+                                pass
+                    except Exception as e:
+                        pass
+                else: #They accepted
+                    try:
+                        final_feature = real_feature
+                        fid_final = final_feature.id() if final_feature is not None else None
+                        if fid_final is not None and fid_final != -1:
+                            try:
+                                final_feature = self.target_layer.getFeature(fid_final)
+                            except:
+                                pass
+                        fields_to_cache = self.collectFieldsToReuse(self.target_layer)
+                        update = {}
+                        for field_name in fields_to_cache:
+                            if final_feature is not None and field_name in final_feature.fields().names():
+                                update[field_name] = final_feature.attribute(field_name)
+                        self.last_values[layer_id] = update
+                    except Exception as e:
+                        pass
+            
+                    
+        #Reset drawing state
+        self.cleanup_after()
+    
+    def field_uses_reuse_flag(self, layer, field_index):
+        """Check if the field has a 'reuse_last_value' custom property set to True."""
+        form_config = layer.editFormConfig()
+        return form_config.reuseLastValue(field_index)
+    
+    def collectFieldsToReuse(self, layer):
+        """Collect fields that have the reuse last value flag set."""
+        fields_to_reuse = []
+        for field in layer.fields():
+            field_index = layer.fields().indexFromName(field.name())
+            if field.name() == self.field_name:
+                continue  # Skip the bearing field
+            if self.field_uses_reuse_flag(layer, field_index):
+                fields_to_reuse.append(field.name())
+        return fields_to_reuse
+    
+    def cleanup_after(self):
+        """Cleanup after adding a point - reset drawing state and rubber band."""
+        self.is_drawing = False
+        self.startPoint = None
+        self.endPoint = None
+        if self.rubberBand is not None:
+            self.rubberBand.reset(QgsWkbTypes.LineGeometry)
