@@ -12,8 +12,8 @@ email=David@deltavgeo.co.uk
 
 about=This plugin adds a tool to drag out a direction on a point - good for adding in point arrows that should be facing a certain direction, or for digitising bird surveys where you want to capture the flight direction of the record. To add a directional point - just click (hold) and drag in the direction you want (then let go).
 
-tracker=http://bugs
-repository=http://repo
+tracker=https://github.com/Skipper-is/QGIS_Directional_Point_Tool/issues
+repository=https://github.com/Skipper-is/QGIS_Directional_Point_Tool
 # End of mandatory metadata
 
 # Recommended items:
@@ -23,9 +23,9 @@ hasProcessingProvider=no
 # changelog=
 
 # Tags are comma separated with spaces allowed
-tags=python
+tags=python, vector, digitisation, point
 
-homepage=http://homepage
+homepage=https://github.com/Skipper-is/QGIS_Directional_Point_Tool
 category=Vector
 icon=icon.png
 # experimental flag
