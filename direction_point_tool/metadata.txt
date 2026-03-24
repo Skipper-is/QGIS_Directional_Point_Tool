@@ -20,7 +20,7 @@ repository=https://github.com/Skipper-is/QGIS_Directional_Point_Tool
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-# changelog=0.2 - Add suport for geometry snapping
+# changelog=0.2 - Add support for geometry snapping (with thanks to cazitouni)
 
 # Tags are comma separated with spaces allowed
 tags=python, vector, digitisation, point
