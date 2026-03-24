@@ -21,21 +21,21 @@
  *                                                                         *
  ***************************************************************************/
 """
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt, QVariant
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.PyQt.QtGui import QIcon, QCursor, QColor
 from qgis.PyQt.QtWidgets import QAction
 from qgis.core import QgsApplication
-from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.gui import QgsMapTool, QgsRubberBand, QgsSnapIndicator
 from qgis.core import (
     QgsPointXY,
-    QgsFeature,
     QgsGeometry,
     QgsProject,
     QgsVectorLayer,
-    QgsField,
     QgsWkbTypes,
     QgsFeatureRequest,
     QgsVectorLayerUtils,
+    QgsSnappingUtils,
+    QgsPointLocator,
 )
 import math
 
@@ -322,7 +322,15 @@ class Tool(QgsMapTool):
         self.endPoint = None
         
         self.last_values = {} #Store the last used values - it's a poor man's "reuse last values" feature
-        
+
+        self.snapper = self.canvas.snappingUtils()
+        if self.snapper is None:
+            self.snapper = QgsSnappingUtils()
+            self.snapper.setMapSettings(self.canvas.mapSettings())
+            self.snapper.setConfig(QgsProject.instance().snappingConfig())
+
+        self.snapIndicator = QgsSnapIndicator(self.canvas)
+
     def setTargetLayer(self, layer):
         self.target_layer = layer
     
@@ -355,11 +363,21 @@ class Tool(QgsMapTool):
             return False
         
         return True
-    
+
+    def snapPoint(self, event_pos):
+        point = self.toMapCoordinates(event_pos)
+        snap_match = self.snapper.snapToMap(point)
+        if snap_match.isValid():
+            self.snapIndicator.setMatch(snap_match)
+            return snap_match.point()
+        else:
+            self.snapIndicator.setMatch(QgsPointLocator.Match())
+            return point
+
     def canvasPressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return # Only respond to left mouse button
-        self.startPoint = self.toMapCoordinates(event.pos())
+        self.startPoint = self.snapPoint(event.pos())
         self.is_drawing = True
         
         if self.rubberBand is None:
@@ -372,8 +390,10 @@ class Tool(QgsMapTool):
         
     def canvasMoveEvent(self, event):
         if not self.is_drawing or self.startPoint is None:
+            if not self.is_drawing:
+                self.snapPoint(event.pos())
             return
-        currentPoint = self.toMapCoordinates(event.pos())
+        currentPoint = self.snapPoint(event.pos())
         self.rubberBand.reset(QgsWkbTypes.LineGeometry)
         self.rubberBand.addPoint(self.startPoint)
         self.rubberBand.addPoint(currentPoint)
@@ -393,7 +413,7 @@ class Tool(QgsMapTool):
     def canvasReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or not self.is_drawing or self.startPoint is None:
             return
-        self.endPoint = self.toMapCoordinates(event.pos())
+        self.endPoint = self.snapPoint(event.pos())
         bearing  = self.computer_bearing(self.startPoint, self.endPoint)
         if self.ensure_target_layer():
             #Layer is all corect, so lets add the point
@@ -430,7 +450,7 @@ class Tool(QgsMapTool):
             try:
                 added = self.target_layer.addFeature(feat)
                 fid = feat.id() if feat.id() is not None else None
-            except Exception as e:
+            except Exception:
                 added = False
             if not added:
                 try:
@@ -442,7 +462,7 @@ class Tool(QgsMapTool):
                         feat = added_feats[0]
                         fid = added_feats[0].id()
                         added = True
-                except Exception as e:
+                except Exception:
                     added=False
                 
                 if not added:
@@ -454,12 +474,12 @@ class Tool(QgsMapTool):
             if fid is not None and fid != -1:
                 try:
                     real_feature = self.target_layer.getFeature(fid)
-                except Exception as e:
+                except Exception:
                     try:
                         req = QgsFeatureRequest().setFilterFid(fid)
                         features = self.target_layer.getFeatures(req)
                         real_feature = next(features, None)
-                    except Exception as e:
+                    except Exception:
                         real_feature = None
                 if real_feature is None:
                     #Still no joy fetching
@@ -475,7 +495,7 @@ class Tool(QgsMapTool):
                         res = self.iface.openFeatureForm(self.target_layer, real_feature)
                         if isinstance(res, bool):
                             accepted = res
-                    except Exception as e:
+                    except Exception:
                         accepted = True  #Fallback to assuming accepted
                 
                 if not accepted:
@@ -487,9 +507,9 @@ class Tool(QgsMapTool):
                         else:
                             try:
                                 self.target_layer.dataProvider().deleteFeatures([fid_to_delete])
-                            except Exception as e:
+                            except Exception:
                                 pass
-                    except Exception as e:
+                    except Exception:
                         pass
                 else: #They accepted
                     try:
@@ -506,7 +526,7 @@ class Tool(QgsMapTool):
                             if final_feature is not None and field_name in final_feature.fields().names():
                                 update[field_name] = final_feature.attribute(field_name)
                         self.last_values[layer_id] = update
-                    except Exception as e:
+                    except Exception:
                         pass
             
                     
@@ -536,3 +556,13 @@ class Tool(QgsMapTool):
         self.endPoint = None
         if self.rubberBand is not None:
             self.rubberBand.reset(QgsWkbTypes.LineGeometry)
+        if self.snapIndicator is not None:
+            self.snapIndicator.setMatch(QgsPointLocator.Match())
+
+    def deactivate(self):
+        """Clean up when tool is deactivated."""
+        if self.snapIndicator is not None:
+            self.snapIndicator.setMatch(QgsPointLocator.Match())
+        if self.rubberBand is not None:
+            self.rubberBand.reset()
+        super().deactivate()

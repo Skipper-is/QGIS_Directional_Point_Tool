@@ -6,7 +6,7 @@
 name=Direction Point Tool
 qgisMinimumVersion=3.0
 description=Adds in point features by dragging in a direction/bearing
-version=0.1
+version=0.2
 author=LC Ecological Services
 email=David@deltavgeo.co.uk
 
@@ -20,7 +20,7 @@ repository=https://github.com/Skipper-is/QGIS_Directional_Point_Tool
 
 hasProcessingProvider=no
 # Uncomment the following line and add your changelog:
-# changelog=
+# changelog=0.2 - Add suport for geometry snapping
 
 # Tags are comma separated with spaces allowed
 tags=python, vector, digitisation, point
